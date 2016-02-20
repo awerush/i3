@@ -89,6 +89,7 @@ ev_prepare *xcb_prep;
 ev_check *xcb_chk;
 ev_io *xcb_io;
 ev_io *xkb_io;
+ev_timer *xcb_tooltip_timer;
 
 /* The name of current binding mode */
 static mode binding;
@@ -1054,6 +1055,24 @@ static void handle_configure_request(xcb_configure_request_event_t *event) {
     DLOG("WARNING: Could not find corresponding tray window.\n");
 }
 
+void xcb_tooltip_timer_cb(struct ev_loop *loop, struct ev_timer *timer, int revents)
+{
+    ELOG("xcb_tooltip_timer_cb called!\n");
+    ev_timer_stop(loop, timer);
+}
+
+static void handle_motion_notify(xcb_motion_notify_event_t *event) {
+    ELOG("handle_motion_notify: timestamp=%d, event_x=%d, event_y=%d\n",
+            event->time, event->event_x, event->event_y);
+    ev_timer_again(main_loop, xcb_tooltip_timer);
+}
+
+static void handle_leave_notify(xcb_leave_notify_event_t *event) {
+    ELOG("handle_leave_notify: timestamp=%d, event_x=%d, event_y=%d\n",
+            event->time, event->event_x, event->event_y);
+    ev_timer_stop(main_loop, xcb_tooltip_timer);
+}
+
 /*
  * This function is called immediately before the main loop locks. We flush xcb
  * then (and only then)
@@ -1180,6 +1199,14 @@ void xcb_chk_cb(struct ev_loop *loop, ev_check *watcher, int revents) {
                 /* ConfigureRequest, sent by a tray child */
                 handle_configure_request((xcb_configure_request_event_t *)event);
                 break;
+            case XCB_MOTION_NOTIFY:
+                /* MotionNotify */
+                handle_motion_notify((xcb_motion_notify_event_t *)event);
+                break;
+            case XCB_LEAVE_NOTIFY:
+                /* LeaveNotify */
+                handle_leave_notify((xcb_leave_notify_event_t *)event);
+                break;
         }
         free(event);
     }
@@ -1241,10 +1268,12 @@ char *init_xcb_early() {
     xcb_io = smalloc(sizeof(ev_io));
     xcb_prep = smalloc(sizeof(ev_prepare));
     xcb_chk = smalloc(sizeof(ev_check));
+    xcb_tooltip_timer = smalloc(sizeof(ev_timer));
 
     ev_io_init(xcb_io, &xcb_io_cb, xcb_get_file_descriptor(xcb_connection), EV_READ);
     ev_prepare_init(xcb_prep, &xcb_prep_cb);
     ev_check_init(xcb_chk, &xcb_chk_cb);
+    ev_timer_init(xcb_tooltip_timer, &xcb_tooltip_timer_cb, 0.0, 1.0);
 
     ev_io_start(main_loop, xcb_io);
     ev_prepare_start(main_loop, xcb_prep);
@@ -1502,10 +1531,12 @@ void clean_xcb(void) {
     xcb_aux_sync(xcb_connection);
     xcb_disconnect(xcb_connection);
 
+    ev_timer_stop(main_loop, xcb_tooltip_timer);
     ev_check_stop(main_loop, xcb_chk);
     ev_prepare_stop(main_loop, xcb_prep);
     ev_io_stop(main_loop, xcb_io);
 
+    FREE(xcb_tooltip_timer);
     FREE(xcb_chk);
     FREE(xcb_prep);
     FREE(xcb_io);
@@ -1673,7 +1704,9 @@ void reconfig_windows(bool redraw_bars) {
              * */
             values[3] = XCB_EVENT_MASK_EXPOSURE |
                         XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
-                        XCB_EVENT_MASK_BUTTON_PRESS;
+                        XCB_EVENT_MASK_BUTTON_PRESS |
+                        XCB_EVENT_MASK_POINTER_MOTION |
+                        XCB_EVENT_MASK_LEAVE_WINDOW;
             if (config.hide_on_modifier == M_DOCK) {
                 /* If the bar is normally visible, catch visibility change events to suspend
                  * the status process when the bar is obscured by full-screened windows.  */
